@@ -1,0 +1,19 @@
+{
+	"InstallScripts" : 
+	[
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Effect/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Id/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Math/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Model/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Motion/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Physics/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Rendering/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Rendering/Metal/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Type/cmake_install.cmake",
+		"/Volumes/T7Sheald/Aria/ThirdParty/Live2D/CubismSdkForNative-5-r.5/build/Framework/src/Utils/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

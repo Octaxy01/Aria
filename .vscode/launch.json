@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Aria}",
+            "name": "Debug AriaApp",
+            "target": "AriaApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AriaApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Aria}",
+            "name": "Release AriaApp",
+            "target": "AriaApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AriaApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Aria}",
+            "name": "Debug Live2DTest",
+            "target": "Live2DTest",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Live2DTest"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Aria}",
+            "name": "Release Live2DTest",
+            "target": "Live2DTest",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Live2DTest"
+        }
+    ]
+}

@@ -1,0 +1,2 @@
+/usr/bin/ar qc /Volumes/T7Sheald/Aria/ThirdParty/Live2D/Lib/libLive2DBridge.a CMakeFiles/Live2DBridge.dir/Volumes/T7Sheald/Aria/Sources/Live2DBridge/ARLive2D.m.o CMakeFiles/Live2DBridge.dir/Volumes/T7Sheald/Aria/Sources/Live2DBridge/Live2DBridge.mm.o
+/usr/bin/ranlib /Volumes/T7Sheald/Aria/ThirdParty/Live2D/Lib/libLive2DBridge.a

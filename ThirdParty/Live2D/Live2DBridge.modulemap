@@ -1,0 +1,5 @@
+module Live2DBridge {
+    umbrella header "include/ARLive2D.h"
+    link "Live2DBridge"
+    export *
+}
