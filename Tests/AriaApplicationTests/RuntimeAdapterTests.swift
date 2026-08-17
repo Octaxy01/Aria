@@ -74,14 +74,3 @@ final class RuntimeAdapterTests: XCTestCase {
         await runtimeAdapter.respondToConfirmation(true)
     }
 }
-
-// MARK: - Mock LLM Provider
-
-private actor MockLLMProvider: LLMResponding {
-    func respond(to request: LLMRequest) async throws -> LLMResponse {
-        return LLMResponse(
-            text: "Mock response",
-            toolCalls: nil
-        )
-    }
-}

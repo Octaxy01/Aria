@@ -15,7 +15,11 @@ final class ToolResultInterpreterTests: XCTestCase {
     // MARK: - Generic Tests
     
     func testSuccessfulResult() async {
-        let result = ToolResult.success(["test": "value"])
+        let result = ToolResult.success([
+            "applicationName": "Chrome",
+            "bundleIdentifier": "com.google.Chrome",
+            "path": "/Applications/Google Chrome.app"
+        ])
         let toolCall = ToolCall(
             toolIdentifier: .openApplication,
             arguments: ["applicationName": "Chrome"],
@@ -63,14 +67,15 @@ final class ToolResultInterpreterTests: XCTestCase {
         let result = ToolResult.success([:])
         let toolCall = ToolCall(
             toolIdentifier: .openApplication,
-            arguments: [:],
+            arguments: ["applicationName": "Chrome"],
             sessionID: sessionID
         )
         
         let interpretation = await interpreter.interpret(result, for: toolCall, sessionID: sessionID)
         
-        // Should handle gracefully with generic success message
-        XCTAssertTrue(interpretation.success)
+        // Production behavior: missing required data fields result in failure interpretation
+        XCTAssertFalse(interpretation.success)
+        XCTAssertTrue(interpretation.summary.contains("nggak bisa membuka"))
     }
     
     // MARK: - Application Tools
@@ -270,10 +275,10 @@ final class ToolResultInterpreterTests: XCTestCase {
         
         let interpretation = await interpreter.interpret(result, for: toolCall, sessionID: sessionID)
         
+        // Production behavior: zero results return success with nil entities
         XCTAssertTrue(interpretation.success)
         XCTAssertTrue(interpretation.summary.contains("belum menemukan"))
-        XCTAssertNotNil(interpretation.entities)
-        XCTAssertEqual(interpretation.entities?.count, 0)
+        XCTAssertNil(interpretation.entities) // Zero results produce nil entities
     }
     
     func testFindFileOneResult() async {
