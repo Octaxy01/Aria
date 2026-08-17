@@ -22,6 +22,18 @@ public struct AriaDesktopApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+        .commands {
+            CommandMenu("Conversation") {
+                Button("Clear Conversation") {
+                    if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+                        Task { @MainActor in
+                            await appDelegate.runtimeAdapter?.clearConversation()
+                        }
+                    }
+                }
+                .keyboardShortcut("k", modifiers: .command)
+            }
+        }
     }
 }
 

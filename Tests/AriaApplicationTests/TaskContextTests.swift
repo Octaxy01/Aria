@@ -546,12 +546,24 @@ final class TaskContextTests: XCTestCase {
             sessionID: oldSessionID
         )
         
-        // New request with new session
-        await taskContextManager.setSessionID(newSessionID)
+        // Verify task is accessible with old session
+        let taskWithOldSession = await taskContextManager.getCurrentTask(sessionID: oldSessionID)
+        XCTAssertNotNil(taskWithOldSession)
         
-        // Old task should not be accessible with new session
-        let task = await taskContextManager.getCurrentTask(sessionID: newSessionID)
-        XCTAssertNil(task)
+        // Try to update with new session ID (should be rejected)
+        await taskContextManager.updateTask(
+            taskKind: .fileSearch,
+            results: [TaskResult(displayName: "new.pdf")],
+            sessionID: newSessionID
+        )
+        
+        // Task should still be the old one (update was rejected)
+        let taskStillOld = await taskContextManager.getCurrentTask(sessionID: oldSessionID)
+        XCTAssertEqual(taskStillOld?.recentResults.first?.displayName, "old.pdf")
+        
+        // Task should not be accessible with new session ID
+        let taskWithNewSession = await taskContextManager.getCurrentTask(sessionID: newSessionID)
+        XCTAssertNil(taskWithNewSession)
     }
     
     // MARK: - Command Tests
