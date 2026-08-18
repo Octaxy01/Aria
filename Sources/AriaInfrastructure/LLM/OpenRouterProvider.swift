@@ -118,6 +118,10 @@ public struct OpenRouterProvider: LLMResponding {
 
             case .system:
                 continue
+            
+            case .toolResult:
+                // Tool results are sent as assistant messages with tool result content
+                role = "assistant"
             }
 
             messages.append([
@@ -196,6 +200,7 @@ public struct OpenRouterProvider: LLMResponding {
             struct Message: Decodable {
                 let role: String?
                 let content: String?
+                let tool_calls: [ProviderToolCall]?
             }
 
             let message: Message?
@@ -203,6 +208,18 @@ public struct OpenRouterProvider: LLMResponding {
         }
 
         let choices: [Choice]?
+    }
+    
+    /// OpenRouter/OpenAI-compatible tool call structure
+    private struct ProviderToolCall: Decodable {
+        let id: String
+        let type: String
+        let function: FunctionCall
+        
+        struct FunctionCall: Decodable {
+            let name: String
+            let arguments: String
+        }
     }
 
     // MARK: - Aria structured response
@@ -265,7 +282,48 @@ public struct OpenRouterProvider: LLMResponding {
             throw OpenRouterProviderError.decodingFailed
         }
 
-        guard let content = envelope.choices?.first?.message?.content,
+        guard let choice = envelope.choices?.first else {
+            throw OpenRouterProviderError.emptyResponse
+        }
+        
+        let message = choice.message
+        
+        // Check for tool calls first
+        if let toolCalls = message?.tool_calls, !toolCalls.isEmpty {
+            // Parse tool calls using the adapter
+            let providerToolCalls = toolCalls.map { toolCall in
+                [
+                    "id": toolCall.id,
+                    "type": toolCall.type,
+                    "function": [
+                        "name": toolCall.function.name,
+                        "arguments": toolCall.function.arguments
+                    ]
+                ]
+            }
+            
+            // Generate a session ID for this request (will be replaced by AssistantCoordinator)
+            let sessionID = UUID()
+            
+            do {
+                let ariaToolCalls = try toolAdapter.parseToolCalls(providerToolCalls, sessionID: sessionID)
+                
+                // Return response with tool calls
+                // Content may be null or empty when tool calls are present
+                let content = message?.content ?? ""
+                return LLMResponse(
+                    text: content,
+                    emotionSignal: nil,
+                    toolCalls: ariaToolCalls
+                )
+            } catch {
+                logger.warning("Failed to parse tool calls: \(error)")
+                // Fall through to treat as normal response
+            }
+        }
+
+        // Normal text response
+        guard let content = message?.content,
               !content.trimmingCharacters(
                 in: .whitespacesAndNewlines
               ).isEmpty

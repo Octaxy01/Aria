@@ -16,11 +16,13 @@ public enum AppBootstrap {
     ///   - llm: The LLM provider to use
     ///   - logger: The logger for status messages
     ///   - config: The application configuration
+    /// - maxToolRounds: Maximum number of tool rounds in a single request (default: 4)
     /// - Returns: A fully configured AssistantCoordinator ready for use
     public static func createCoordinator(
         llm: any LLMResponding,
         logger: any Logging,
-        config: AppConfiguration
+        config: AppConfiguration,
+        maxToolRounds: Int = 4
     ) async -> AssistantCoordinator {
         let conversationService = ConversationService()
         
@@ -53,7 +55,8 @@ public enum AppBootstrap {
             character: .aria,
             initialRelationshipState: initialRelationshipState,
             memoryContextBuilder: memoryContextBuilder,
-            memoryFormationService: memoryFormationService
+            memoryFormationService: memoryFormationService,
+            maxToolRounds: maxToolRounds
         )
     }
     
@@ -205,11 +208,16 @@ public enum AppBootstrap {
     }
     
     /// Creates a runtime adapter for UI integration.
-    /// - Parameter coordinator: The assistant coordinator to bridge to
+    /// - Parameters:
+    ///   - coordinator: The assistant coordinator to bridge to
+    ///   - ttsService: Optional TTS service for voice output
     /// - Returns: A configured AriaRuntimeAdapter
     @MainActor
-    public static func createRuntimeAdapter(coordinator: AssistantCoordinator) -> AriaRuntimeAdapter {
-        return AriaRuntimeAdapter(coordinator: coordinator)
+    public static func createRuntimeAdapter(
+        coordinator: AssistantCoordinator,
+        ttsService: TextToSpeechService? = nil
+    ) -> AriaRuntimeAdapter {
+        return AriaRuntimeAdapter(coordinator: coordinator, ttsService: ttsService)
     }
 
 }

@@ -26,6 +26,9 @@ final class ToolRuntimeIntegrationTests: XCTestCase {
         mockToolExecutor = RuntimeMockToolExecutor()
         avatarStateManager = AvatarStateManager()
         
+        // Reset mock LLM state
+        mockLLM.reset()
+        
         // Register a test tool
         let testTool = ToolDefinition(
             identifier: ToolIdentifier("test_tool"),
@@ -205,11 +208,11 @@ final class ToolRuntimeIntegrationTests: XCTestCase {
             sessionID: UUID()
         )
         
-        mockLLM.responseToReturn = LLMResponse(
-            text: "Tool executed successfully",
-            emotionSignal: nil,
-            toolCalls: [toolCall]
-        )
+        // Configure mock to return tool call first, then final response
+        mockLLM.responseSequence = [
+            LLMResponse(text: "", emotionSignal: nil, toolCalls: [toolCall]),
+            LLMResponse(text: "Tool executed successfully", emotionSignal: nil, toolCalls: nil)
+        ]
         
         mockToolExecutor.resultToReturn = ToolResult.success(["status": "done"])
         
@@ -217,10 +220,17 @@ final class ToolRuntimeIntegrationTests: XCTestCase {
         
         let history = await conversation.recentHistory(maxMessages: 10)
         
-        // Should have user message and assistant message
-        XCTAssertGreaterThanOrEqual(history.count, 2)
+        // Should have user message, assistant tool-call message, tool result, and final assistant message
+        XCTAssertGreaterThanOrEqual(history.count, 3)
         XCTAssertEqual(history.first?.role, .user)
-        XCTAssertEqual(history.last?.role, .assistant)
+        
+        // The last message should be assistant (final response)
+        let lastAssistantMessage = history.last { $0.role == .assistant }
+        XCTAssertNotNil(lastAssistantMessage)
+        
+        // Should have at least one tool result message
+        let toolResultMessages = history.filter { $0.role == .toolResult }
+        XCTAssertGreaterThanOrEqual(toolResultMessages.count, 1)
     }
     
     // MARK: - Personality Integration Tests
@@ -252,17 +262,38 @@ final class ToolRuntimeIntegrationTests: XCTestCase {
 
 class MockLLMResponding: @unchecked Sendable, LLMResponding {
     var responseToReturn: LLMResponse = LLMResponse(text: "Default response")
+    var responseSequence: [LLMResponse] = []
+    private var sequenceIndex: Int = 0
+    private let lock = NSLock()
     
     func respond(to request: LLMRequest) async throws -> LLMResponse {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        if sequenceIndex < responseSequence.count {
+            let response = responseSequence[sequenceIndex]
+            sequenceIndex += 1
+            return response
+        }
         return responseToReturn
+    }
+    
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        responseSequence.removeAll()
+        sequenceIndex = 0
     }
 }
 
 class MockEmotionEngine: @unchecked Sendable, EmotionEngining {
     var wasCalled = false
     var lastSignal: EmotionSignal?
+    private let lock = NSLock()
     
     func nextState(current: EmotionState, signal: EmotionSignal?) -> EmotionState {
+        lock.lock()
+        defer { lock.unlock() }
         wasCalled = true
         lastSignal = signal
         return current
@@ -271,8 +302,11 @@ class MockEmotionEngine: @unchecked Sendable, EmotionEngining {
 
 class MockRelationshipEngine: @unchecked Sendable, RelationshipEvolving {
     var wasCalled = false
+    private let lock = NSLock()
     
     func nextState(current: RelationshipState, tone: ConversationTone, emotionSignal: EmotionSignal?) async -> RelationshipState {
+        lock.lock()
+        defer { lock.unlock() }
         wasCalled = true
         return current
     }

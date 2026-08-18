@@ -2,6 +2,30 @@ import Foundation
 import AriaDomain
 import AriaInfrastructure
 
+/// Result from tool orchestration including execution results and correlation IDs.
+public struct ToolOrchestrationResult: Sendable {
+    /// The LLM response that triggered tool execution
+    public let originalResponse: LLMResponse
+    /// Tool results with their correlation IDs for LLM continuation
+    public let toolResults: [(toolCall: ToolCall, result: ToolResult)]
+    /// Whether the orchestration requires user interaction (confirmation/clarification)
+    public let requiresUserInteraction: Bool
+    /// Whether the orchestration should continue to LLM (false if user interaction needed)
+    public let shouldContinueToLLM: Bool
+    
+    public init(
+        originalResponse: LLMResponse,
+        toolResults: [(toolCall: ToolCall, result: ToolResult)] = [],
+        requiresUserInteraction: Bool = false,
+        shouldContinueToLLM: Bool = true
+    ) {
+        self.originalResponse = originalResponse
+        self.toolResults = toolResults
+        self.requiresUserInteraction = requiresUserInteraction
+        self.shouldContinueToLLM = shouldContinueToLLM
+    }
+}
+
 /// Orchestrates tool calling and execution for LLM responses.
 /// Manages the tool loop, validation, execution, and conversation history.
 public actor ToolOrchestrator {
@@ -73,18 +97,23 @@ public actor ToolOrchestrator {
     ///   - response: The LLM response to process
     ///   - sessionID: Current session ID for validation
     ///   - conversation: Conversation service for history management
-    /// - Returns: Final LLM response after tool execution loop
+    /// - Returns: ToolOrchestrationResult with execution results and continuation status
     /// - Throws: ToolOrchestrationError if orchestration fails
     public func processResponse(
         _ response: LLMResponse,
         sessionID: UUID,
         conversation: ConversationService
-    ) async throws -> LLMResponse {
+    ) async throws -> ToolOrchestrationResult {
         
         // Check for tool calls
         guard let toolCalls = response.toolCalls, !toolCalls.isEmpty else {
-            // No tool calls, return response as-is
-            return response
+            // No tool calls, return orchestration result that indicates no continuation needed
+            return ToolOrchestrationResult(
+                originalResponse: response,
+                toolResults: [],
+                requiresUserInteraction: false,
+                shouldContinueToLLM: false
+            )
         }
         
         // Set current session
@@ -109,12 +138,14 @@ public actor ToolOrchestrator {
         logger.info("Tool orchestration started with \(toolCalls.count) tool calls")
         
         // Execute tool loop
-        return try await executeToolLoop(
+        let orchestrationResult = try await executeToolLoop(
             originalResponse: response,
             toolCalls: toolCalls,
             sessionID: sessionID,
             conversation: conversation
         )
+        
+        return orchestrationResult
     }
     
     /// Executes the tool loop with max rounds enforcement.
@@ -123,215 +154,220 @@ public actor ToolOrchestrator {
         toolCalls: [ToolCall],
         sessionID: UUID,
         conversation: ConversationService
-    ) async throws -> LLMResponse {
+    ) async throws -> ToolOrchestrationResult {
         
         let currentToolCalls = toolCalls
-        var toolResults: [ToolResult] = []
+        var toolResults: [(toolCall: ToolCall, result: ToolResult)] = []
         
-        while currentRound < maxToolRounds {
-            // Check for cancellation
+        // Validate session is still active
+        guard currentSessionID == sessionID else {
+            logger.warning("Tool orchestration cancelled due to stale session")
+            throw ToolOrchestrationError.staleSession
+        }
+        
+        // Check for cancellation
+        try Task.checkCancellation()
+        
+        // Validate and execute tool calls (single round execution)
+        for toolCall in currentToolCalls {
+            // Check for cancellation before each tool
             try Task.checkCancellation()
             
-            // Validate session is still active
+            // Validate session
             guard currentSessionID == sessionID else {
-                logger.warning("Tool orchestration cancelled due to stale session")
+                logger.warning("Tool execution cancelled due to stale session")
                 throw ToolOrchestrationError.staleSession
             }
             
-            // Validate and execute tool calls
-            for toolCall in currentToolCalls {
-                // Check for cancellation before each tool
-                try Task.checkCancellation()
+            // Validate tool call
+            try await validateToolCall(toolCall)
+            
+            // Resolve references in tool arguments if reference resolver is available
+            let resolvedToolCall = try await resolveReferences(in: toolCall)
+            
+            // Check if resolution resulted in ambiguity
+            if let ambiguity = await checkForAmbiguity(in: resolvedToolCall) {
+                // Store clarification request and return special result
+                logger.info("Ambiguity detected in tool call, clarification needed")
                 
-                // Validate session
-                guard currentSessionID == sessionID else {
-                    logger.warning("Tool execution cancelled due to stale session")
-                    throw ToolOrchestrationError.staleSession
-                }
-                
-                // Validate tool call
-                try await validateToolCall(toolCall)
-                
-                // Resolve references in tool arguments if reference resolver is available
-                let resolvedToolCall = try await resolveReferences(in: toolCall)
-                
-                // Check if resolution resulted in ambiguity
-                if let ambiguity = await checkForAmbiguity(in: resolvedToolCall) {
-                    // Store clarification request and return special result
-                    logger.info("Ambiguity detected in tool call, clarification needed")
-                    
-                    // Publish clarification requested event
-                    if case .ambiguous(let candidates) = ambiguity {
-                        let clarificationCandidates = candidates.map { candidate in
-                            ClarificationCandidate(
-                                displayName: candidate.displayName,
-                                type: candidate.kind.rawValue
-                            )
-                        }
-                        publishEvent(.clarificationRequested(
-                            sessionID: sessionID,
-                            question: "Aku menemukan beberapa item. Yang mana yang kamu maksud?",
-                            candidates: clarificationCandidates
-                        ))
+                // Publish clarification requested event
+                if case .ambiguous(let candidates) = ambiguity {
+                    let clarificationCandidates = candidates.map { candidate in
+                        ClarificationCandidate(
+                            displayName: candidate.displayName,
+                            type: candidate.kind.rawValue
+                        )
                     }
-                    
-                    return try await handleAmbiguity(
-                        ambiguity,
-                        originalToolCall: toolCall,
-                        resolvedToolCall: resolvedToolCall,
+                    publishEvent(.clarificationRequested(
                         sessionID: sessionID,
-                        conversation: conversation
-                    )
+                        question: "Aku menemukan beberapa item. Yang mana yang kamu maksud?",
+                        candidates: clarificationCandidates
+                    ))
                 }
                 
-                // Check confirmation policy
-                guard let toolDefinition = await toolRegistry.tool(for: resolvedToolCall.toolIdentifier) else {
-                    throw ToolOrchestrationError.toolNotFound(resolvedToolCall.toolIdentifier)
-                }
+                let _ = try await handleAmbiguity(
+                    ambiguity,
+                    originalToolCall: toolCall,
+                    resolvedToolCall: resolvedToolCall,
+                    sessionID: sessionID,
+                    conversation: conversation
+                )
                 
-                let requiresConfirmation = await confirmationPolicy.requiresConfirmation(
+                // Return with user interaction required
+                return ToolOrchestrationResult(
+                    originalResponse: originalResponse,
+                    toolResults: [],
+                    requiresUserInteraction: true,
+                    shouldContinueToLLM: false
+                )
+            }
+            
+            // Check confirmation policy
+            guard let toolDefinition = await toolRegistry.tool(for: resolvedToolCall.toolIdentifier) else {
+                throw ToolOrchestrationError.toolNotFound(resolvedToolCall.toolIdentifier)
+            }
+            
+            let requiresConfirmation = await confirmationPolicy.requiresConfirmation(
+                toolDefinition: toolDefinition,
+                toolCall: resolvedToolCall
+            )
+            
+            if requiresConfirmation {
+                // Store pending confirmation and return special result
+                logger.info("Confirmation required for tool: \(resolvedToolCall.toolIdentifier.rawValue)")
+                
+                // Publish confirmation requested event
+                let actionDescription = await confirmationPolicy.confirmationMessage(
                     toolDefinition: toolDefinition,
                     toolCall: resolvedToolCall
                 )
+                publishEvent(.confirmationRequested(
+                    sessionID: sessionID,
+                    action: actionDescription
+                ))
                 
-                if requiresConfirmation {
-                    // Store pending confirmation and return special result
-                    logger.info("Confirmation required for tool: \(resolvedToolCall.toolIdentifier.rawValue)")
-                    
-                    // Publish confirmation requested event
-                    let actionDescription = await confirmationPolicy.confirmationMessage(
-                        toolDefinition: toolDefinition,
-                        toolCall: resolvedToolCall
-                    )
-                    publishEvent(.confirmationRequested(
-                        sessionID: sessionID,
-                        action: actionDescription
-                    ))
-                    
-                    return try await handleConfirmationRequired(
-                        toolCall: resolvedToolCall,
-                        toolDefinition: toolDefinition,
-                        sessionID: sessionID,
-                        conversation: conversation
-                    )
-                }
+                let _ = try await handleConfirmationRequired(
+                    toolCall: resolvedToolCall,
+                    toolDefinition: toolDefinition,
+                    sessionID: sessionID,
+                    conversation: conversation
+                )
                 
-                // Publish tool started event
-                let toolName = toolDefinition.description
-                publishEvent(.toolStarted(sessionID: sessionID, activity: "Aria sedang \(toolName)..."))
-                
-                // Execute tool
-                let result = try await executeTool(resolvedToolCall)
-                toolResults.append(result)
-                
-                // Publish tool finished event
-                publishEvent(.toolFinished(sessionID: sessionID))
-                
-                // Interpret result if interpreter is available
-                let interpretation = if let resultInterpreter = resultInterpreter {
-                    await resultInterpreter.interpret(result, for: resolvedToolCall, sessionID: sessionID)
-                } else {
-                    // Fallback to raw result if no interpreter
-                    ToolResultInterpretation(
-                        success: result.success,
-                        summary: result.success ? "Operasi berhasil." : (result.error ?? "Operasi gagal."),
-                        details: result.data,
-                        entities: nil,
-                        errorCategory: nil,
-                        displayToUser: true
-                    )
-                }
-                
-                // Check for recovery availability on failure
-                if !result.success {
-                    // Determine error category from result
-                    let errorCategory: ToolErrorCategory
-                    if let error = result.error {
-                        if error.contains("cancelled") {
-                            errorCategory = .cancelled
-                        } else if error.contains("permission") {
-                            errorCategory = .permissionDenied
-                        } else if error.contains("not found") {
-                            errorCategory = .notFound
-                        } else if error.contains("unavailable") {
-                            errorCategory = .unavailable
-                        } else {
-                            errorCategory = .executionFailed
-                        }
+                // Return with user interaction required
+                return ToolOrchestrationResult(
+                    originalResponse: originalResponse,
+                    toolResults: [],
+                    requiresUserInteraction: true,
+                    shouldContinueToLLM: false
+                )
+            }
+            
+            // Publish tool started event
+            let toolName = toolDefinition.description
+            publishEvent(.toolStarted(sessionID: sessionID, activity: "Aria sedang \(toolName)..."))
+            
+            // Execute tool
+            let result = try await executeTool(resolvedToolCall)
+            toolResults.append((toolCall: resolvedToolCall, result: result))
+            
+            // Publish tool finished event
+            publishEvent(.toolFinished(sessionID: sessionID))
+            
+            // Interpret result if interpreter is available
+            let interpretation = if let resultInterpreter = resultInterpreter {
+                await resultInterpreter.interpret(result, for: resolvedToolCall, sessionID: sessionID)
+            } else {
+                // Fallback to raw result if no interpreter
+                ToolResultInterpretation(
+                    success: result.success,
+                    summary: result.success ? "Operasi berhasil." : (result.error ?? "Operasi gagal."),
+                    details: result.data,
+                    entities: nil,
+                    errorCategory: nil,
+                    displayToUser: true
+                )
+            }
+            
+            // Check for recovery availability on failure
+            if !result.success {
+                // Determine error category from result
+                let errorCategory: ToolErrorCategory
+                if let error = result.error {
+                    if error.contains("cancelled") {
+                        errorCategory = .cancelled
+                    } else if error.contains("permission") {
+                        errorCategory = .permissionDenied
+                    } else if error.contains("not found") {
+                        errorCategory = .notFound
+                    } else if error.contains("unavailable") {
+                        errorCategory = .unavailable
                     } else {
                         errorCategory = .executionFailed
                     }
-                    
-                    let canRetry = await failureRecoveryPolicy.shouldRetry(
-                        errorCategory: errorCategory,
-                        currentRetryCount: currentRound,
-                        toolCall: resolvedToolCall,
-                        sessionID: sessionID
-                    )
-                    publishEvent(.recoveryAvailable(sessionID: sessionID, canRetry: canRetry))
+                } else {
+                    errorCategory = .executionFailed
                 }
                 
-                // Record entity from interpretation if entity context is available
-                // STATE MUTATION GATE: Only record entities on success
-                // Failed, cancelled, or stale operations must not create entities
-                if interpretation.success, let entities = interpretation.entities {
-                    // Validate session before recording
-                    if currentSessionID == sessionID {
-                        if let entityContext = entityContext {
-                            for entity in entities {
-                                await entityContext.record(entity, sessionID: sessionID)
-                            }
-                        }
-                    } else {
-                        logger.warning("Attempted to record entity with stale session ID")
-                    }
-                } else if result.success {
-                    // Fallback to legacy entity recording if interpretation doesn't provide entities
-                    // Validate session before recording
-                    if currentSessionID == sessionID {
-                        if let entityContext = entityContext {
-                            await recordEntity(from: result, for: toolCall, sessionID: sessionID, entityContext: entityContext)
-                        }
-                    } else {
-                        logger.warning("Attempted to record entity with stale session ID")
-                    }
-                }
-                
-                // Update task context if available and tool succeeded
-                // STATE MUTATION GATE: Only update task context on success
-                // Failed, cancelled, or stale operations must not update task context
-                if result.success {
-                    // Validate session before updating
-                    if currentSessionID == sessionID {
-                        if let taskContextManager = taskContextManager {
-                            await updateTaskContext(from: result, for: toolCall, interpretation: interpretation, sessionID: sessionID, taskContextManager: taskContextManager)
-                        }
-                    } else {
-                        logger.warning("Attempted to update task context with stale session ID")
-                    }
-                }
-                
-                // Add interpreted result to conversation history
-                await addInterpretedResultToConversation(interpretation, for: toolCall, conversation: conversation)
+                let canRetry = await failureRecoveryPolicy.shouldRetry(
+                    errorCategory: errorCategory,
+                    currentRetryCount: currentRound,
+                    toolCall: resolvedToolCall,
+                    sessionID: sessionID
+                )
+                publishEvent(.recoveryAvailable(sessionID: sessionID, canRetry: canRetry))
             }
             
-            currentRound += 1
+            // Record entity from interpretation if entity context is available
+            // STATE MUTATION GATE: Only record entities on success
+            // Failed, cancelled, or stale operations must not create entities
+            if interpretation.success, let entities = interpretation.entities {
+                // Validate session before recording
+                if currentSessionID == sessionID {
+                    if let entityContext = entityContext {
+                        for entity in entities {
+                            await entityContext.record(entity, sessionID: sessionID)
+                        }
+                    }
+                } else {
+                    logger.warning("Attempted to record entity with stale session ID")
+                }
+            } else if result.success {
+                // Fallback to legacy entity recording if interpretation doesn't provide entities
+                // Validate session before recording
+                if currentSessionID == sessionID {
+                    if let entityContext = entityContext {
+                        await recordEntity(from: result, for: toolCall, sessionID: sessionID, entityContext: entityContext)
+                    }
+                } else {
+                    logger.warning("Attempted to record entity with stale session ID")
+                }
+            }
             
-            // Check if we should continue the loop
-            // For now, we'll stop after one round since we don't have LLM continuation yet
-            // This will be enhanced when we implement the full loop
-            break
+            // Update task context if available and tool succeeded
+            // STATE MUTATION GATE: Only update task context on success
+            // Failed, cancelled, or stale operations must not update task context
+            if result.success {
+                // Validate session before updating
+                if currentSessionID == sessionID {
+                    if let taskContextManager = taskContextManager {
+                        await updateTaskContext(from: result, for: toolCall, interpretation: interpretation, sessionID: sessionID, taskContextManager: taskContextManager)
+                    }
+                } else {
+                    logger.warning("Attempted to update task context with stale session ID")
+                }
+            }
+            
+            // Add interpreted result to conversation history
+            await addInterpretedResultToConversation(interpretation, for: toolCall, conversation: conversation)
         }
         
-        if currentRound >= maxToolRounds {
-            logger.warning("Tool loop reached max rounds (\(maxToolRounds))")
-        }
-        
-        // Build final response from interpretations
-        // If we have interpretations, use their summaries to build a natural response
-        // For now, we return the original response text - this will be enhanced
-        // when we implement LLM continuation with tool results
-        return originalResponse
+        // Return orchestration result with tool results for LLM continuation
+        return ToolOrchestrationResult(
+            originalResponse: originalResponse,
+            toolResults: toolResults,
+            requiresUserInteraction: false,
+            shouldContinueToLLM: !toolResults.isEmpty
+        )
     }
     
     /// Validates a tool call against the tool registry.
@@ -777,7 +813,7 @@ public actor ToolOrchestrator {
     ///   - resolvedToolCall: The resolved tool call (with unresolved references)
     ///   - sessionID: The session ID
     ///   - conversation: The conversation service
-    /// - Returns: LLM response with clarification message
+    /// - Returns: ToolOrchestrationResult with clarification message
     /// - Throws: ToolOrchestrationError if handling fails
     private func handleAmbiguity(
         _ ambiguity: ResolutionResult,
@@ -785,7 +821,7 @@ public actor ToolOrchestrator {
         resolvedToolCall: ToolCall,
         sessionID: UUID,
         conversation: ConversationService
-    ) async throws -> LLMResponse {
+    ) async throws -> ToolOrchestrationResult {
         guard case .ambiguous(let candidates) = ambiguity else {
             throw ToolOrchestrationError.invalidArguments("Expected ambiguous result")
         }
@@ -812,10 +848,17 @@ public actor ToolOrchestrator {
         
         await clarificationManager.storeClarification(clarificationRequest, sessionID: sessionID)
         
-        // Return LLM response with clarification message
-        return LLMResponse(
+        // Return orchestration result with clarification message
+        let clarificationResponse = LLMResponse(
             text: clarificationMessage,
             toolCalls: nil
+        )
+        
+        return ToolOrchestrationResult(
+            originalResponse: clarificationResponse,
+            toolResults: [],
+            requiresUserInteraction: true,
+            shouldContinueToLLM: false
         )
     }
     
@@ -825,14 +868,14 @@ public actor ToolOrchestrator {
     ///   - toolDefinition: The tool definition
     ///   - sessionID: The session ID
     ///   - conversation: The conversation service
-    /// - Returns: LLM response with confirmation message
+    /// - Returns: ToolOrchestrationResult with confirmation message
     /// - Throws: ToolOrchestrationError if handling fails
     private func handleConfirmationRequired(
         toolCall: ToolCall,
         toolDefinition: ToolDefinition,
         sessionID: UUID,
         conversation: ConversationService
-    ) async throws -> LLMResponse {
+    ) async throws -> ToolOrchestrationResult {
         // Generate confirmation message
         let confirmationMessage = await confirmationPolicy.confirmationMessage(
             toolDefinition: toolDefinition,
@@ -848,11 +891,18 @@ public actor ToolOrchestrator {
             summary: toolDefinition.description
         )
         
-        // Return response with confirmation message
-        return LLMResponse(
+        // Return orchestration result with confirmation message
+        let confirmationResponse = LLMResponse(
             text: confirmationMessage,
             emotionSignal: nil,
             toolCalls: nil
+        )
+        
+        return ToolOrchestrationResult(
+            originalResponse: confirmationResponse,
+            toolResults: [],
+            requiresUserInteraction: true,
+            shouldContinueToLLM: false
         )
     }
     

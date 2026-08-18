@@ -58,8 +58,8 @@ final class ToolOrchestratorTests: XCTestCase {
         
         let result = try await orchestrator.processResponse(response, sessionID: sessionID, conversation: mockConversation)
         
-        XCTAssertEqual(result.text, "Hello, how can I help?")
-        XCTAssertNil(result.toolCalls)
+        XCTAssertEqual(result.originalResponse.text, "Hello, how can I help?")
+        XCTAssertNil(result.originalResponse.toolCalls)
         XCTAssertFalse(mockExecutor.wasCalled)
     }
     
@@ -69,7 +69,7 @@ final class ToolOrchestratorTests: XCTestCase {
         
         let result = try await orchestrator.processResponse(response, sessionID: sessionID, conversation: mockConversation)
         
-        XCTAssertEqual(result.text, "Hello")
+        XCTAssertEqual(result.originalResponse.text, "Hello")
         XCTAssertFalse(mockExecutor.wasCalled)
     }
     
@@ -92,8 +92,8 @@ final class ToolOrchestratorTests: XCTestCase {
         
         XCTAssertTrue(mockExecutor.wasCalled)
         XCTAssertEqual(mockExecutor.lastCall?.toolIdentifier.rawValue, "test_tool")
-        // ToolOrchestrator returns the original response text, not a hardcoded message
-        XCTAssertEqual(result.text, "")
+        // ToolOrchestrator returns the original response in the orchestration result
+        XCTAssertEqual(result.originalResponse.text, "")
     }
     
     func testProcessResponseWithMultipleToolCalls() async throws {
@@ -206,8 +206,8 @@ final class ToolOrchestratorTests: XCTestCase {
         let result = try await orchestrator.processResponse(response, sessionID: sessionID, conversation: mockConversation)
         
         XCTAssertTrue(mockExecutor.wasCalled)
-        // ToolOrchestrator returns the original response text, not a hardcoded message
-        XCTAssertEqual(result.text, "")
+        // ToolOrchestrator returns the original response in the orchestration result
+        XCTAssertEqual(result.originalResponse.text, "")
     }
     
     // MARK: - Tool Failure Tests
@@ -229,7 +229,7 @@ final class ToolOrchestratorTests: XCTestCase {
         
         XCTAssertTrue(mockExecutor.wasCalled)
         // ToolOrchestrator returns the original response text, not a hardcoded message
-        XCTAssertEqual(result.text, "")
+        XCTAssertEqual(result.originalResponse.text, "")
     }
     
     // MARK: - Max Rounds Tests
@@ -258,7 +258,7 @@ final class ToolOrchestratorTests: XCTestCase {
         
         XCTAssertTrue(mockExecutor.wasCalled)
         // ToolOrchestrator returns the original response text, not a hardcoded message
-        XCTAssertEqual(result.text, "")
+        XCTAssertEqual(result.originalResponse.text, "")
     }
     
     // MARK: - Conversation History Tests
@@ -333,19 +333,21 @@ final class ToolOrchestratorTests: XCTestCase {
     }
 }
 
-// MARK: - Mock Classes
+// MARK: - Mock Classes (shared across test files)
 
-class MockToolExecutor: @unchecked Sendable, ToolExecuting {
+internal class MockToolExecutor: @unchecked Sendable, ToolExecuting {
     var wasCalled = false
     var lastCall: ToolCall?
     var callCount = 0
     var resultToReturn: ToolResult = ToolResult.success()
     var shouldCancel = false
+    var calls: [ToolCall] = []
     
     func execute(_ call: ToolCall) async throws -> ToolResult {
         wasCalled = true
         lastCall = call
         callCount += 1
+        calls.append(call)
         
         if shouldCancel {
             throw ToolExecutionError.cancelled
@@ -355,7 +357,7 @@ class MockToolExecutor: @unchecked Sendable, ToolExecuting {
     }
 }
 
-class MockLogger: @unchecked Sendable, Logging {
+internal class MockLogger: @unchecked Sendable, Logging {
     var loggedMessages: [String] = []
     
     func log(_ level: LogLevel, _ message: String, file: String, line: Int) {

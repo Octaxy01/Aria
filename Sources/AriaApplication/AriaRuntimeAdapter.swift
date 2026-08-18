@@ -12,6 +12,7 @@ public final class AriaRuntimeAdapter {
     // MARK: - Dependencies
     
     private let coordinator: AssistantCoordinator
+    private let ttsService: TextToSpeechService?
     private var eventStreamTask: Task<Void, Never>?
     
     // MARK: - UI State
@@ -64,9 +65,12 @@ public final class AriaRuntimeAdapter {
     // MARK: - Initialization
     
     /// Creates a new runtime adapter.
-    /// - Parameter coordinator: The assistant coordinator to bridge to
-    public init(coordinator: AssistantCoordinator) {
+    /// - Parameters:
+    ///   - coordinator: The assistant coordinator to bridge to
+    ///   - ttsService: Optional TTS service for voice output
+    public init(coordinator: AssistantCoordinator, ttsService: TextToSpeechService? = nil) {
         self.coordinator = coordinator
+        self.ttsService = ttsService
         subscribeToRuntimeEvents()
         setupToolEventPublisher()
     }
@@ -173,6 +177,12 @@ public final class AriaRuntimeAdapter {
         currentToolActivity = nil
         canRetryTool = false
         isToolSubmissionPending = false
+        
+        // Update messages and trigger TTS for assistant responses
+        Task {
+            await updateMessages()
+            await synthesizeLatestAssistantResponse()
+        }
     }
     
     private func handleRequestCancelled(sessionID: UUID) {
@@ -306,6 +316,48 @@ public final class AriaRuntimeAdapter {
         messages = conversation.map { ConversationMessageViewData.from($0) }
     }
     
+    /// Synthesizes speech for the latest assistant response if TTS is available.
+    private func synthesizeLatestAssistantResponse() async {
+        guard let tts = ttsService else { return }
+        
+        let conversation = await coordinator.getConversation()
+        guard let lastMessage = conversation.last, lastMessage.role == .assistant else { return }
+        
+        // Get current state for TTS context
+        let emotionState = await coordinator.currentEmotionState()
+        let relationshipState = await coordinator.currentRelationshipState()
+        
+        // Determine tone from the last user message (simple inline classification)
+        let userMessages = conversation.filter { $0.role == .user }
+        let tone: ConversationTone = userMessages.last.map { message in
+            let text = message.content.lowercased()
+            if text.contains("capek") || text.contains("lelah") || text.contains("sedih") ||
+               text.contains("tired") || text.contains("sad") || text.contains("stressed") {
+                return .emotional
+            }
+            return .casual
+        } ?? .casual
+        
+        do {
+            // Stop any existing audio playback to prevent overlap
+            await tts.stopCurrentSpeech()
+            
+            // Synthesize and play the response
+            if let audioFile = try await tts.synthesizeResponse(
+                lastMessage.content,
+                emotion: emotionState,
+                relationship: relationshipState,
+                tone: tone
+            ) {
+                try await tts.playAudio(audioFile)
+            }
+        } catch {
+            // TTS failure should not block the conversation
+            print("[AriaRuntimeAdapter] TTS synthesis failed: \(error)")
+            await tts.ensureAvatarIdle()
+        }
+    }
+    
     /// Cancels the current request.
     public func cancelRequest() async {
         await coordinator.cancelCurrentRequest()
@@ -392,16 +444,21 @@ public final class AriaRuntimeAdapter {
     /// Sets the mute state.
     /// - Parameter muted: Whether to mute audio
     public func setMuted(_ muted: Bool) async {
-        // This needs to be added to AssistantCoordinator
-        // For now, this is a placeholder
-        // In a future update, we should add a dedicated setMuted() method
+        guard let tts = ttsService else { return }
+        await tts.setMuted(muted)
+        isMuted = muted
+    }
+    
+    /// Toggles the mute state.
+    public func toggleMute() async {
+        let newMutedState = !isMuted
+        await setMuted(newMutedState)
     }
     
     /// Stops current speech playback.
     public func stopSpeech() async {
-        // This needs to be added to AssistantCoordinator
-        // For now, this is a placeholder
-        // In a future update, we should add a dedicated stopSpeech() method
+        guard let tts = ttsService else { return }
+        await tts.stopCurrentSpeech()
     }
     
     // MARK: - Cleanup

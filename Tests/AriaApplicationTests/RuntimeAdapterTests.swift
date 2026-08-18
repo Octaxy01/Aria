@@ -21,7 +21,7 @@ final class RuntimeAdapterTests: XCTestCase {
             config: mockConfig
         )
         
-        runtimeAdapter = await AriaRuntimeAdapter(coordinator: coordinator)
+        runtimeAdapter = await AriaRuntimeAdapter(coordinator: coordinator, ttsService: nil)
     }
     
     override func tearDown() async throws {
@@ -72,5 +72,28 @@ final class RuntimeAdapterTests: XCTestCase {
     func testRespondToConfirmation() async {
         // Test that respondToConfirmation doesn't crash
         await runtimeAdapter.respondToConfirmation(true)
+    }
+    
+    func testToggleMute() async {
+        // When TTS service is nil, toggleMute should not change state
+        await MainActor.run {
+            XCTAssertFalse(runtimeAdapter.isMuted)
+        }
+        
+        await runtimeAdapter.toggleMute()
+        
+        await MainActor.run {
+            // Without TTS service, state should remain unchanged
+            XCTAssertFalse(runtimeAdapter.isMuted)
+        }
+    }
+    
+    func testStopSpeech() async {
+        // Should not throw even without TTS service
+        await runtimeAdapter.stopSpeech()
+        
+        await MainActor.run {
+            XCTAssertFalse(runtimeAdapter.isAudioPlaying)
+        }
     }
 }

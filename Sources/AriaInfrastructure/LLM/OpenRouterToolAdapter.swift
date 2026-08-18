@@ -72,10 +72,14 @@ public struct OpenRouterToolAdapter: Sendable {
     /// Parses OpenRouter tool calls from API response.
     /// - Parameter toolCalls: OpenRouter tool call objects
     /// - Parameter sessionID: Current session ID for validation
-    /// - Returns: Array of Aria ToolCall objects
+    /// - Returns: Array of Aria ToolCall objects with provider call IDs mapped to correlation IDs
     /// - Throws: ToolCallParseError if parsing fails
     public func parseToolCalls(_ toolCalls: [[String: Any]], sessionID: UUID) throws -> [ToolCall] {
         return try toolCalls.map { toolCall in
+            guard let callID = toolCall["id"] as? String else {
+                throw ToolCallParseError.missingToolName
+            }
+            
             guard let functionName = toolCall["function"] as? [String: Any],
                   let name = functionName["name"] as? String else {
                 throw ToolCallParseError.missingToolName
@@ -96,10 +100,14 @@ public struct OpenRouterToolAdapter: Sendable {
                 arguments = argumentsDict
             }
             
+            // Use provider call ID as correlation ID for tracking
+            let correlationID = UUID(uuidString: callID) ?? UUID()
+            
             return ToolCall(
                 toolIdentifier: identifier,
                 arguments: arguments,
-                sessionID: sessionID
+                sessionID: sessionID,
+                correlationID: correlationID
             )
         }
     }

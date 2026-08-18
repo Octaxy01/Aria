@@ -41,6 +41,7 @@ public struct AriaDesktopApp: App {
 public class AppDelegate: NSObject, NSApplicationDelegate {
     var coordinator: AssistantCoordinator?
     var runtimeAdapter: AriaRuntimeAdapter?
+    var ttsService: TextToSpeechService?
     
     public func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize backend components
@@ -85,12 +86,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let avatarStateManager = AppBootstrap.createAvatarStateManager()
         await coordinator.setAvatarStateManager(avatarStateManager)
         
-        // Initialize runtime adapter
-        let runtimeAdapter = AppBootstrap.createRuntimeAdapter(coordinator: coordinator)
+        // Initialize TTS service with avatar state manager integration
+        let ttsService = await AppBootstrap.createTTSServiceWithAvatar(
+            logger: logger,
+            avatarStateManager: avatarStateManager
+        )
+        
+        // Initialize runtime adapter with TTS service
+        let runtimeAdapter = AppBootstrap.createRuntimeAdapter(
+            coordinator: coordinator,
+            ttsService: ttsService
+        )
         
         // Store for cleanup
         self.coordinator = coordinator
         self.runtimeAdapter = runtimeAdapter
+        self.ttsService = ttsService
         
         // Load initial conversation
         await loadInitialConversation()
@@ -291,6 +302,35 @@ public struct ConversationView: View {
                 .fontWeight(.bold)
             
             Spacer()
+            
+            // Audio controls
+            HStack(spacing: 8) {
+                // Mute/Unmute button
+                Button(action: {
+                    Task {
+                        await adapter.toggleMute()
+                    }
+                }) {
+                    Image(systemName: adapter.isMuted ? "speaker.slash.fill" : "speaker.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(adapter.isMuted ? .secondary : .primary)
+                }
+                .buttonStyle(.plain)
+                .help(adapter.isMuted ? "Unmute" : "Mute")
+                
+                // Stop button
+                Button(action: {
+                    Task {
+                        await adapter.stopSpeech()
+                    }
+                }) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.primary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop speech")
+            }
         }
         .padding()
         .background(Color(NSColor.controlBackgroundColor))

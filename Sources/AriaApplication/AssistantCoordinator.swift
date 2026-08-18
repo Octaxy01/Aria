@@ -42,6 +42,7 @@ public actor AssistantCoordinator {
     private let clarificationAnswerParser: ClarificationAnswerParser?
     private let resultInterpreter: ToolResultInterpreter?
     private let taskContextManager: TaskContextManager?
+    private let maxToolRounds: Int
     private let confirmationAnswerParser: ConfirmationAnswerParser
     private let intentHistory: IntentHistory
 
@@ -86,7 +87,8 @@ public actor AssistantCoordinator {
         clarificationManager: ClarificationManager? = nil,
         clarificationAnswerParser: ClarificationAnswerParser? = nil,
         resultInterpreter: ToolResultInterpreter? = nil,
-        taskContextManager: TaskContextManager? = nil
+        taskContextManager: TaskContextManager? = nil,
+        maxToolRounds: Int = 4
     ) {
         self.llm = llm
         self.conversation = conversation
@@ -94,6 +96,7 @@ public actor AssistantCoordinator {
         self.relationshipEngine = relationshipEngine
         self.character = character
         self.maxContextMessages = maxContextMessages
+        self.maxToolRounds = maxToolRounds
         self.memoryContextBuilder = memoryContextBuilder
         self.memoryFormationService = memoryFormationService
         self.languageSettings = languageSettings
@@ -486,7 +489,8 @@ public actor AssistantCoordinator {
             }
             
             // Instead of throwing, return a graceful fallback response
-            let fallbackResponse = generateFallbackResponse(for: detectedLanguage, error: error)
+            let currentLanguage = languageSettings.effectiveOutputLanguage
+            let fallbackResponse = generateFallbackResponse(for: currentLanguage, error: error)
             let fallbackMessage = await conversation.append(role: .assistant, content: fallbackResponse.text)
             
             // Use neutral emotion for fallback responses
@@ -524,7 +528,8 @@ public actor AssistantCoordinator {
                 try? await manager.transitionToIdle()
             }
             // Return a graceful response indicating the request was cancelled
-            let staleResponse = generateFallbackResponse(for: detectedLanguage)
+            let currentLanguage = languageSettings.effectiveOutputLanguage
+            let staleResponse = generateFallbackResponse(for: currentLanguage)
             let staleMessage = await conversation.append(role: .assistant, content: staleResponse.text)
             
             // Use neutral emotion for stale responses
@@ -543,22 +548,14 @@ public actor AssistantCoordinator {
             )
         }
 
-        // Process tool calls if present
+        // Process tool calls with multi-round LLM continuation
         let finalResponse: LLMResponse
-        if let toolOrchestrator = toolOrchestrator, let toolCalls = response.toolCalls, !toolCalls.isEmpty {
-            print("[Conversation] Processing \(toolCalls.count) tool calls")
-            do {
-                finalResponse = try await toolOrchestrator.processResponse(
-                    response,
-                    sessionID: requestID,
-                    conversation: conversation
-                )
-                print("[Conversation] Tool orchestration completed")
-            } catch {
-                print("[Conversation] Tool orchestration failed: \(error)")
-                // Fall through to use the original response
-                finalResponse = response
-            }
+        if let toolOrchestrator = toolOrchestrator {
+            finalResponse = try await executeToolLoop(
+                initialResponse: response,
+                requestID: requestID,
+                toolOrchestrator: toolOrchestrator
+            )
         } else {
             finalResponse = response
         }
@@ -586,7 +583,8 @@ public actor AssistantCoordinator {
             }
             
             // Return a graceful error response instead of throwing
-            let fallbackResponse = generateFallbackResponse(for: detectedLanguage, error: nil)
+            let currentLanguage = languageSettings.effectiveOutputLanguage
+            let fallbackResponse = generateFallbackResponse(for: currentLanguage, error: nil)
             let fallbackMessage = await conversation.append(role: .assistant, content: fallbackResponse.text)
             
             // Use neutral emotion for fallback responses
@@ -777,6 +775,181 @@ public actor AssistantCoordinator {
         return trimmed.isEmpty ? "" : text
     }
     
+    /// Executes the multi-round LLM → tool → LLM continuation loop.
+    /// - Parameters:
+    ///   - initialResponse: The initial LLM response
+    ///   - requestID: Current request ID for validation
+    ///   - toolOrchestrator: Tool orchestrator for tool execution
+    /// - Returns: Final LLM response after tool loop completes
+    /// - Throws: Error if loop execution fails
+    private func executeToolLoop(
+        initialResponse: LLMResponse,
+        requestID: UUID,
+        toolOrchestrator: ToolOrchestrator
+    ) async throws -> LLMResponse {
+        
+        var currentResponse = initialResponse
+        var currentRound = 0
+        
+        while currentRound < maxToolRounds {
+            // Check for cancellation
+            try Task.checkCancellation()
+            
+            // Validate session is still active
+            guard currentRequestID == requestID else {
+                print("[Conversation] Tool loop cancelled due to stale session")
+                let currentLanguage = languageSettings.effectiveOutputLanguage
+                return generateFallbackResponse(for: currentLanguage)
+            }
+            
+            // Check if current response has tool calls
+            guard let toolCalls = currentResponse.toolCalls, !toolCalls.isEmpty else {
+                print("[Conversation] No tool calls in response, tool loop complete")
+                return currentResponse
+            }
+            
+            print("[Conversation] Tool loop round \(currentRound + 1): Processing \(toolCalls.count) tool calls")
+            
+            // Update tool calls to use the correct session ID
+            let updatedToolCalls = toolCalls.map { toolCall in
+                ToolCall(
+                    toolIdentifier: toolCall.toolIdentifier,
+                    arguments: toolCall.arguments,
+                    sessionID: requestID,
+                    correlationID: toolCall.correlationID
+                )
+            }
+            
+            // Create updated response with correct session IDs
+            let updatedResponse = LLMResponse(
+                text: currentResponse.text,
+                emotionSignal: currentResponse.emotionSignal,
+                toolCalls: updatedToolCalls
+            )
+            
+            // Execute tools via orchestrator
+            let orchestrationResult = try await toolOrchestrator.processResponse(
+                updatedResponse,
+                sessionID: requestID,
+                conversation: conversation
+            )
+            
+            print("[Conversation] Tool orchestration completed for round \(currentRound + 1)")
+            
+            // Check if user interaction is required
+            if orchestrationResult.requiresUserInteraction {
+                print("[Conversation] User interaction required, stopping tool loop")
+                return orchestrationResult.originalResponse
+            }
+            
+            // Check if continuation should proceed
+            guard orchestrationResult.shouldContinueToLLM else {
+                print("[Conversation] No continuation needed, tool loop complete")
+                return orchestrationResult.originalResponse
+            }
+            
+            // Add tool results to conversation
+            for (toolCall, result) in orchestrationResult.toolResults {
+                let toolResultContent = formatToolResultForConversation(toolCall: toolCall, result: result)
+                _ = await conversation.append(role: .toolResult, content: toolResultContent)
+            }
+            
+            print("[Conversation] Tool results added to conversation, calling LLM again")
+            
+            // Call LLM again with updated conversation
+            currentResponse = try await continueWithToolResults(
+                originalResponse: orchestrationResult.originalResponse,
+                sessionID: requestID
+            )
+            
+            currentRound += 1
+        }
+        
+        // Max rounds reached
+        print("[Conversation] Tool loop reached max rounds (\(maxToolRounds))")
+        return currentResponse
+    }
+    
+    /// Continues conversation with LLM after tool execution.
+    /// - Parameters:
+    ///   - originalResponse: The original LLM response that triggered tool execution
+    ///   - sessionID: Current session ID for validation
+    /// - Returns: Final LLM response after processing tool results
+    /// - Throws: Error if continuation fails
+    private func continueWithToolResults(
+        originalResponse: LLMResponse,
+        sessionID: UUID
+    ) async throws -> LLMResponse {
+        // Validate session is still active
+        guard currentRequestID == sessionID else {
+            print("[Conversation] Session invalidated during tool continuation")
+            // Use current detected language from conversation context
+            let currentLanguage = languageSettings.effectiveOutputLanguage
+            return generateFallbackResponse(for: currentLanguage)
+        }
+        
+        // Build continuation request with updated conversation history
+        let messages = await conversation.recentHistory(maxMessages: maxContextMessages)
+        
+        // Build LLM request with tool definitions
+        let toolDefinitions = toolRegistry != nil ? await toolRegistry!.allTools() : nil
+        
+        let continuationRequest = LLMRequest(
+            messages: messages,
+            systemContext: basePrompt,
+            toolDefinitions: toolDefinitions
+        )
+        
+        print("[Conversation] Calling LLM with tool results")
+        
+        // Call LLM with tool results in conversation
+        let continuationResponse = try await llm.respond(to: continuationRequest)
+        
+        print("[Conversation] LLM continuation completed")
+        
+        return continuationResponse
+    }
+    
+    /// Formats tool result for conversation history.
+    /// - Parameters:
+    ///   - toolCall: The tool call that was executed
+    ///   - result: The result from tool execution
+    /// - Returns: Formatted string for conversation
+    private func formatToolResultForConversation(toolCall: ToolCall, result: ToolResult) -> String {
+        var components: [String] = []
+        
+        components.append("Tool: \(toolCall.toolIdentifier.rawValue)")
+        
+        if result.success {
+            components.append("Status: Success")
+            if let data = result.data {
+                components.append("Result: \(formatDataForDisplay(data))")
+            }
+        } else {
+            components.append("Status: Failed")
+            if let error = result.error {
+                components.append("Error: \(error)")
+            }
+        }
+        
+        return components.joined(separator: " | ")
+    }
+    
+    /// Formats data dictionary for display in conversation.
+    /// - Parameter data: The data dictionary to format
+    /// - Returns: Formatted string representation
+    private func formatDataForDisplay(_ data: [String: Sendable]) -> String {
+        let limitedData = Array(data.prefix(5)) // Limit to 5 key-value pairs
+        let formatted = limitedData.map { key, value in
+            "\(key): \(value)"
+        }.joined(separator: ", ")
+        
+        if data.count > 5 {
+            return "\(formatted)..."
+        }
+        return formatted
+    }
+    
     /// Generates a graceful fallback response when LLM fails or returns empty content.
     private func generateFallbackResponse(for language: SupportedLanguage, error: Error? = nil) -> LLMResponse {
         let fallbackText: String
@@ -922,7 +1095,7 @@ public actor AssistantCoordinator {
         )
         
         do {
-            let finalResponse = try await toolOrchestrator.processResponse(
+            let orchestrationResult = try await toolOrchestrator.processResponse(
                 resolvedResponse,
                 sessionID: requestID,
                 conversation: conversation
@@ -930,8 +1103,11 @@ public actor AssistantCoordinator {
             
             print("[Conversation] Tool execution with resolved entity completed")
             
+            // Extract the actual LLM response from orchestration result
+            let finalResponse = orchestrationResult.originalResponse
+            
             // Process the response normally
-            let detectedLanguage = LanguageDetector.detect(text)
+            let currentLanguage = languageSettings.effectiveOutputLanguage
             let tone = ConversationToneClassifier.classify(text)
             
             let validatedText = validateResponseText(finalResponse.text)
@@ -939,7 +1115,7 @@ public actor AssistantCoordinator {
             
             guard !qualityGuardedText.isEmpty else {
                 print("[Conversation] Empty response after tool execution, using fallback")
-                let fallbackResponse = generateFallbackResponse(for: detectedLanguage, error: nil)
+                let fallbackResponse = generateFallbackResponse(for: currentLanguage, error: nil)
                 let fallbackMessage = await conversation.append(role: .assistant, content: fallbackResponse.text)
                 
                 let fallbackEmotion = EmotionSignal(emotion: .neutral, intensity: 0.3)
@@ -990,8 +1166,8 @@ public actor AssistantCoordinator {
                 try? await manager.transitionToIdle()
             }
             
-            let detectedLanguage = LanguageDetector.detect(text)
-            let fallbackResponse = generateFallbackResponse(for: detectedLanguage, error: error)
+            let currentLanguage = languageSettings.effectiveOutputLanguage
+            let fallbackResponse = generateFallbackResponse(for: currentLanguage, error: error)
             let fallbackMessage = await conversation.append(role: .assistant, content: fallbackResponse.text)
             
             let fallbackEmotion = EmotionSignal(emotion: .neutral, intensity: 0.3)

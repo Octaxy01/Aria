@@ -62,6 +62,7 @@ public struct GeminiProvider: LLMResponding {
             case .user: role = "user"
             case .assistant: role = "model"
             case .system: return nil // carried via systemInstruction instead
+            case .toolResult: role = "model" // Tool results sent as model messages
             }
             return ["role": role, "parts": [["text": message.content]]]
         }

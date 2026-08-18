@@ -20,6 +20,10 @@ public actor MockLLMProvider: LLMResponding {
     /// Simulated error to throw
     private let simulatedError: Error
     
+    /// Optional response sequence for multi-round testing
+    public var responseSequence: [LLMResponse] = []
+    private var sequenceIndex: Int = 0
+    
     public init(
         responses: [LLMResponse] = [],
         delay: TimeInterval = 0,
@@ -54,6 +58,8 @@ public actor MockLLMProvider: LLMResponding {
         responses.removeAll()
         currentIndex = 0
         shouldThrowError = false
+        responseSequence.removeAll()
+        sequenceIndex = 0
     }
     
     public func respond(to request: LLMRequest) async throws -> LLMResponse {
@@ -67,7 +73,14 @@ public actor MockLLMProvider: LLMResponding {
             throw simulatedError
         }
         
-        // Return next response, or empty response if none configured
+        // Check response sequence first (for multi-round testing)
+        if sequenceIndex < responseSequence.count {
+            let response = responseSequence[sequenceIndex]
+            sequenceIndex += 1
+            return response
+        }
+        
+        // Fall back to legacy responses array
         if currentIndex < responses.count {
             let response = responses[currentIndex]
             currentIndex += 1

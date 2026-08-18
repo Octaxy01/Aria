@@ -3,4 +3,5 @@ public enum ConversationRole: String, Sendable, Codable, Equatable {
     case user
     case assistant
     case system
+    case toolResult
 }

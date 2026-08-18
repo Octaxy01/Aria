@@ -201,14 +201,15 @@ final class AssistantCoordinatorTests: XCTestCase {
             conversation: ConversationService(),
             emotionEngine: EmotionService(),
             relationshipEngine: relationshipEngine,
-            character: .aria
+            character: .aria,
+            languageSettings: LanguageSettings(outputLanguage: .english)
         )
         
         let result = try await coordinator.handleUserInput("test message")
         
         // Should return a fallback response, not empty
         XCTAssertFalse(result.reply.content.isEmpty)
-        XCTAssertTrue(result.reply.content.contains("Sorry") || result.reply.content.contains("Maaf"))
+        XCTAssertTrue(result.reply.content.contains("Sorry"))
         
         // History should have the fallback assistant message
         let history = await coordinator.currentConversationHistory()
@@ -225,15 +226,16 @@ final class AssistantCoordinatorTests: XCTestCase {
             conversation: ConversationService(),
             emotionEngine: EmotionService(),
             relationshipEngine: relationshipEngine,
-            character: .aria
+            character: .aria,
+            languageSettings: LanguageSettings(outputLanguage: .english)
         )
         
         let result = try await coordinator.handleUserInput("test message")
         
         // Should return a graceful fallback response
         XCTAssertFalse(result.reply.content.isEmpty)
-        // Generic fallback doesn't need to contain specific error text
-        XCTAssertTrue(result.reply.content.contains("Sorry") || result.reply.content.contains("Maaf"))
+        // Network error fallback contains "connection" 
+        XCTAssertTrue(result.reply.content.contains("connection") || result.reply.content.contains("Sorry"))
         
         // History should have the fallback assistant message
         let history = await coordinator.currentConversationHistory()
@@ -248,15 +250,16 @@ final class AssistantCoordinatorTests: XCTestCase {
             conversation: ConversationService(),
             emotionEngine: EmotionService(),
             relationshipEngine: relationshipEngine,
-            character: .aria
+            character: .aria,
+            languageSettings: LanguageSettings(outputLanguage: .english)
         )
         
         let result = try await coordinator.handleUserInput("test message")
         
         // Should return a graceful fallback response
         XCTAssertFalse(result.reply.content.isEmpty)
-        // Generic fallback doesn't need to contain specific error text
-        XCTAssertTrue(result.reply.content.contains("Sorry") || result.reply.content.contains("Maaf"))
+        // Rate limit fallback contains "request limit"
+        XCTAssertTrue(result.reply.content.contains("request limit") || result.reply.content.contains("Sorry"))
         
         // History should have the fallback assistant message
         let history = await coordinator.currentConversationHistory()
